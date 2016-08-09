@@ -12,6 +12,7 @@ import org.objectweb.asm.Type;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.annotation.AnnotationUtils;
 import org.springframework.web.bind.annotation.*;
+import sun.reflect.generics.reflectiveObjects.ParameterizedTypeImpl;
 
 import java.io.InputStream;
 import java.lang.annotation.Annotation;
@@ -48,7 +49,6 @@ public class MethodGenerator {
     private final boolean futureReturnType;
     private final boolean isBinaryReturnType;
     private final boolean isFutureBinaryReturnType;
-    private final Class<?> supClass;
 
     private final String implp;
     String restReqBuilder = p(RestReqBuilder.class);
@@ -56,7 +56,7 @@ public class MethodGenerator {
     private boolean validatorsEnabled;
 
 
-    public MethodGenerator(ClassWriter classWriter, String implName, Method method, String classRequestMapping, Class<?> supClass) {
+    public MethodGenerator(ClassWriter classWriter, String implName, Method method, String classRequestMapping) {
         this.implName = implName;
         this.implp = p(implName);
         this.method = method;
@@ -72,7 +72,6 @@ public class MethodGenerator {
         this.isBinaryReturnType = returnType == InputStream.class;
         this.isFutureBinaryReturnType = futureReturnType
                 && Types.getGenericTypeArgument(method) == InputStream.class;
-        this.supClass = supClass;
     }
 
     private MethodVisitor visitMethod(Method method, ClassWriter classWriter) {
@@ -109,6 +108,7 @@ public class MethodGenerator {
         generateValidateCode();
         createMap(1, PathVariable.class);
         createMap(2, RequestParam.class);
+        createMap(3, CookieValue.class);
 
         buildUniRestReq();
         request();
@@ -153,8 +153,8 @@ public class MethodGenerator {
     }
 
     private void request() {
-        mv.visitVarInsn(ASTORE, offsetSize + 3);
-        mv.visitVarInsn(ALOAD, offsetSize + 3);
+        mv.visitVarInsn(ASTORE, offsetSize + 4);
+        mv.visitVarInsn(ALOAD, offsetSize + 4);
 
         if (isPostMethodOrNone()) {
             int requestBodyOffset = findRequestBodyParameterOffset();
@@ -219,6 +219,9 @@ public class MethodGenerator {
 
         mv.visitVarInsn(ALOAD, offsetSize + 2);
         mv.visitMethodInsn(INVOKEVIRTUAL, restReqBuilder, "requestParams", sigRest(Map.class), false);
+
+        mv.visitVarInsn(ALOAD, offsetSize + 3);
+        mv.visitMethodInsn(INVOKEVIRTUAL, restReqBuilder, "cookies", sigRest(Map.class), false);
 
         mv.visitMethodInsn(INVOKEVIRTUAL, restReqBuilder, "build", sig(RestReq.class), false);
     }
@@ -303,7 +306,7 @@ public class MethodGenerator {
             }
 
             mv.visitLdcInsn(Type.getType((Class) futureType));
-            mv.visitVarInsn(ALOAD, offsetSize + 3);
+            mv.visitVarInsn(ALOAD, offsetSize + 4);
             mv.visitMethodInsn(INVOKESTATIC, p(Futures.class),
                     futureType == Void.class ? "convertFutureVoid" : "convertFuture",
                     sig(Future.class, Future.class, Class.class, RestReq.class), false);
@@ -314,7 +317,14 @@ public class MethodGenerator {
                 mv.visitMethodInsn(INVOKESTATIC, p(Beans.class), "unmarshal",
                         sig(Object.class, String.class, Class.class), false);
             } else {
-                buildGenericReturn();
+                java.lang.reflect.Type genericReturnType = method.getGenericReturnType();
+                if (genericReturnType instanceof ParameterizedTypeImpl) {
+                    buildGenericReturn((ParameterizedTypeImpl) genericReturnType);
+
+                } else {
+                    mv.visitLdcInsn(Type.getType(returnType));
+                }
+
                 mv.visitMethodInsn(INVOKESTATIC, p(Beans.class), "unmarshal",
                         sig(Object.class, String.class, java.lang.reflect.Type.class), false);
             }
@@ -323,27 +333,34 @@ public class MethodGenerator {
         mv.visitInsn(ARETURN);
     }
 
-    private void buildGenericReturn() {
-        mv.visitLdcInsn(Type.getType(ci(supClass)));
-        mv.visitLdcInsn(method.getName());
+    private void buildGenericReturn(ParameterizedTypeImpl impl) {
+        // ParameterizedTypeImpl.make(List.class, new Class[]{String.class}, null);
+        mv.visitLdcInsn(Type.getType(method.getReturnType()));
 
-        if (paramSize <= 5) mv.visitInsn(ICONST_0 + paramSize);
-        else mv.visitIntInsn(BIPUSH, paramSize);
+        java.lang.reflect.Type[] actualTypeArgs = impl.getActualTypeArguments();
+
+        if (paramSize <= 5) mv.visitInsn(ICONST_0 + actualTypeArgs.length);
+        else mv.visitIntInsn(BIPUSH, actualTypeArgs.length);
+
         mv.visitTypeInsn(ANEWARRAY, p(Class.class));
 
-        for (int i = 0; i < paramSize; ++i) {
+        for (int i = 0; i < actualTypeArgs.length; ++i) {
             mv.visitInsn(DUP);
+
             if (i <= 5) mv.visitInsn(ICONST_0 + i);
             else mv.visitIntInsn(BIPUSH, i);
-            mv.visitLdcInsn(Type.getType(ci(parameterTypes[i])));
+
+            mv.visitLdcInsn(Type.getType((Class) actualTypeArgs[i]));
             mv.visitInsn(AASTORE);
         }
 
-        mv.visitMethodInsn(INVOKEVIRTUAL, p(Class.class), "getMethod",
-                sig(Method.class, String.class, Class[].class), false);
-        mv.visitMethodInsn(INVOKEVIRTUAL, p(Method.class), "getGenericReturnType",
-                sig(java.lang.reflect.Type.class), false);
+        mv.visitInsn(ACONST_NULL);
+        mv.visitMethodInsn(INVOKESTATIC, p(ParameterizedTypeImpl.class),
+                "make", sig(ParameterizedTypeImpl.class, Class.class,
+                        java.lang.reflect.Type[].class,
+                        java.lang.reflect.Type.class), false);
     }
+
 
     private void primitiveValueOfAndReturn() {
         Class<?> wrapped = Primitives.wrap(returnType);
